@@ -1,0 +1,449 @@
+---
+title: "bat_calls"
+author: "Ilya"
+Ce: "11/12/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#####install packages
+```{r packages, echo=FALSE}
+pkgTest <- function(x)
+{
+  if (x %in% rownames(installed.packages()) == FALSE) {
+    install.packages(x, dependencies= TRUE)    
+  }
+  library(x, character.only = TRUE)
+}
+neededPackages <- c("caret", #for the confusionMatrix() function (also needs e1071 package)
+                    "dplyr",# for some data preparation
+        "gbm",#gbm
+                    "caTools", "ROCR")
+
+for (package in neededPackages){pkgTest(package)}
+
+```
+
+##read in data
+```{r}
+C = read.csv("Calls.csv")
+C$Species_no = 0
+igrey = which(C$Species=="Grey")
+C$Species_no[igrey]=1
+
+rm = c("Name", "Species")
+keep= setdiff(names(C), rm)
+C = C[,keep]
+
+save(C, file = "C.Rdata")
+```
+
+
+```{r}
+load("C.Rdata")
+# get the feature real names
+label_col = which(names(C)== "Species_no")
+
+names <-  colnames(C[,-c(label_col)])
+y_col = label_col
+
+model<-as.formula(paste(colnames(C)[y_col], "~",
+                        paste(names,collapse = "+"),
+                        sep = ""))
+model
+
+DP =createDataPartition(y = C$Species_no, 
+                        p = 0.8,
+                        list = FALSE)
+Train = C[DP,]
+Test = C[-DP,]
+
+ptm<-proc.time()
+
+n.trees = 15000
+shrinkage = 0.001#final version should be 0.001
+cv.folds = 10#final version should be 10
+gbmtest<- gbm(model,
+              data=Train,
+              distribution="bernoulli",
+              n.trees=n.trees,
+              shrinkage=shrinkage,
+              interaction.depth=3,
+              bag.fraction=0.50,
+              train.fraction=1,
+              n.minobsinnode=5,
+              cv.folds=cv.folds,
+              keep.data=TRUE,
+              verbose=TRUE,
+              n.cores=NULL)
+
+save(gbmtest, file = "gbmtest.RCa")
+#check performance using 5-fold cross-valiCion
+best.iter <- gbm.perf(gbmtest,method="cv",plot.it=FALSE) #this gives you the optimal number of trees based on cv performance, other methods will over or under predict
+print(best.iter)
+
+gbm_error = data.frame(train.error = gbmtest$train.error,
+                       trees = seq(1,n.trees))
+plot <- ggplot(gbm_error, aes(x = trees, y = train.error))+
+  geom_line()
+plot
+ggsave(filename = "deviance_enviro_vector.jpg",
+       plot = plot)
+#Stop the clock
+(proc.time()-ptm)/60
+
+load("gbmtest.RCa")
+best.iter <- gbm.perf(gbmtest,method="cv",plot.it=FALSE) #this gives you the optimal number of trees based on cv performance, other methods 
+# output predictions on the TRAINING SET
+output<-predict(gbmtest, 
+                newdata=Train, 
+                n.trees=best.iter, 
+                type="response") 
+
+output<-cbind(output,Train$Species_no)
+colnames(output)<-c("output","data")
+rownames(output)<-rownames(Train)
+output<-output[order(-output[,1]),]
+
+# # AUC for Bernoulli distributed responses
+par(mar = c(1,1,1,1))
+auc=colAUC(output[,1],output[,2],
+           plotROC = TRUE)
+
+print(auc)
+pred<-prediction(output[,1],output[,2])
+perf<-performance(pred,"tpr","fpr")
+
+par(mar = c(1,1,1,1))
+plot(perf,colorize=TRUE,main="ROC full model")
+abline(a=0, b= 1)
+
+# output predictions on the Test SET
+output<-predict(gbmtest,
+                newdata=Test,
+                n.trees=best.iter,
+                type="response")
+Test$pred = round(output)
+
+output<-cbind(output,Test$Species_no)
+colnames(output)<-c("output","data")
+rownames(output)<-rownames(Test)
+output<-output[order(-output[,1]),]
+
+# # AUC for Bernoulli distributed responses
+par(mar = c(1,1,1,1))
+auc=colAUC(output[,1],output[,2],
+           plotROC = TRUE)
+
+print(auc)
+pred<-prediction(output[,1],output[,2])
+perf<-performance(pred,"tpr","fpr")
+
+par(mar = c(1,1,1,1))
+plot(perf,colorize=TRUE,main="ROC full model test data")
+
+
+```
+
+
+#### confusion matrix-- rodents -- GBM
+```{r}
+# confusion matrix -- Test set
+confusionMatrix(data = factor(Test$pred),
+                factor(Test$Species_no),
+                mode = "everything")
+
+# inds_observed_1_predicted_0 = which(Test$Species_no == 1 & Test$pred ==0)
+# 
+# Test$Matches[inds_observed_1_predicted_0]
+# 
+# inds_observed_0_predicted_1 = which(Test$Species_no == 0 & Test$pred ==1)
+# Test$Matches[inds_observed_0_predicted_1]
+
+# output predictions on the Train SET
+output<-predict(gbmtest,
+                newdata=Train,
+                n.trees=best.iter,
+                type="response")
+Train$pred = round(output)
+# confusion matrix
+confusionMatrix(data = factor(Train$pred),
+                factor(Train$Species_no),
+                mode = "everything")
+
+
+```
+
+
+###permute labels and find AUC -- bootstrap
+```{r boot_gbm_auc}
+load("C.Rdata")
+
+#Start the clock
+ptm<-proc.time()
+
+permutedAUC<-c()
+
+word = "binomial"
+best.iter.list = c()
+
+i=1
+while (i <= 50) {
+  # for permutation loop
+  
+  ## random permutation of Label
+  randomLabel<-sample(C$Species_no)
+
+  pan2<-cbind(randomLabel,C)
+  #remove previous label
+  rm = "Species_no"
+  keep = setdiff(names(pan2),rm)
+  pan2 = pan2[,keep]
+  
+  pan2[,1]<-sapply(pan2[,1],as.character)
+  
+  ## create training and test sets
+  intrain2<-createDataPartition(y=pan2$randomLabel,
+                                p=0.8,
+                                list=FALSE)
+  
+  test2<-pan2[-intrain2,]
+  training2<-pan2[intrain2,]
+  
+  check<-1-is.na(training2)*1
+  checksum<-apply(check,2,sum)
+  if(length(which(checksum>=2))==dim(training2)[2]){#this makes sure we don't get any columns with all zeros. Should be == to the number of columns
+ 
+  
+    ## random permutation of Labels ~ traits
+    label_col = which(names(training2)== "randomLabel")
+  
+    names <-  colnames(training2[,-c(label_col)])
+    y_col = label_col
+
+    model<-as.formula(paste(colnames(training2)[y_col], "~",
+                        paste(names,collapse = "+"),
+                        sep = ""))
+    
+    
+    gbm2<- gbm(model,
+                   data=training2, 
+                   distribution="bernoulli",
+                   n.trees=15000,
+                   shrinkage=0.001,
+                   interaction.depth=3,
+                   bag.fraction=0.50,
+                   train.fraction=1,
+                   n.minobsinnode=3,
+                   cv.folds=10,
+                   keep.data=TRUE)
+    # verbose=TRUE)
+    
+    #check performance using 5-fold cross-valiCion
+    best.iter2 <- gbm.perf(gbm2,method="cv",plot.it=FALSE) #OOB method under predicts
+    best.iter.list=c(best.iter.list, best.iter2)
+
+        #   batsum2<-summary.gbm(gbm2,n.trees=best.iter,method=relative.influence,plotit=FALSE)
+    
+    ## LABEL
+    ## predictions on the TRAINING SET
+    output2<-predict(gbm2, newdata=training2, n.trees=best.iter2, type="response") 
+    output2<-cbind(output2,as.numeric(training2$randomLabel))
+    #   colnames(output2)<-c("output","label")
+    #   output2<-output2[order(-as.numeric(output2[,1])),]
+    
+    # # training AUC for Bernoulli distributed responses
+    auc2=colAUC(output2[,1],output2[,2])
+    
+    # Predictions on the TEST set
+    output.test2<-predict(gbm2, newdata=test2, n.trees=best.iter2, type="response") 
+    output.test2<-cbind(output.test2,as.numeric(test2$randomLabel))
+    # colnames(output.test2)<-c("output","label")
+    # output.test2<-output.test2[order(-output.test2[,1]),]
+    # plot(output.test)
+    
+    ## test AUC for Bernoulli distributed responses
+    auctest2=colAUC(output.test2[,1],output.test2[,2])
+    
+    permutedAUC[i]<-auctest2
+    print(auctest2)
+    i=i+1
+    print(i)#check where we are in bootstrap
+  } else i=i
+}
+sum(is.na(permutedAUC)*1) #how many NAs
+permutedAUC2<-na.omit(permutedAUC)
+mean(permutedAUC2)
+sd(permutedAUC2)
+#Stop the clock
+(proc.time()-ptm)/60
+write.csv(best.iter.list, file = paste0("best.iter.list.","AUC.", word, ".csv"))
+```
+
+
+
+###plot relative influence
+```{r gbm_rel_inf}
+
+load("gbmtest.Rdata")
+x = summary(gbmtest)
+# 
+x.df= data.frame(variable = x$var,
+                 relative.influence = x$rel.inf)
+
+x.df.0 = subset(x.df, relative.influence==0)
+dim(x.df.0)[1]
+x.df = subset(x.df, relative.influence>=1)#take only interesting variables
+
+x.df$variable = factor(x.df$variable, levels = x.df$variable[order(x.df$relative.influence)])
+save(x.df, file = "x.df.Rdata")
+ggplot(data = x.df, aes(x = variable, y =relative.influence))+
+  ylab("relative influence (%)")+
+  xlab("variable")+
+  geom_bar(stat="identity")+
+  coord_flip()
+# 
+ggsave("Figure.relative.influence.jpg")
+
+
+```
+
+
+##Bootstrap permutations for distribution of relative influence --   
+```{r boot_relative_influence}
+load("C.Rdata")
+df  = C
+#Start the clock
+ptm<-proc.time()
+
+permutedAUC<-c()
+permutedAUC_train<-c()
+
+out = NULL
+list_save <- list()
+intrain_list = NULL
+best.iter2.list = c()
+bootstrap_runs=50
+i = 1
+while (i <= bootstrap_runs) {
+  # for permutation loop
+  ## create training and test sets
+  pan2 = df
+  intrain2<-createDataPartition(y=pan2$Species_no,
+                                p=0.8,
+                                list=FALSE)
+  test2<-pan2[-intrain2,]
+  training2<-pan2[intrain2,]
+  intrain_list[[i]]=intrain2
+  
+  check<-1-is.na(training2)*1
+  checksum<-apply(check,2,sum)
+  n_cols = dim(training2)[2]
+  
+  if(length(which(checksum>=2))==n_cols){#this makes sure we don't get any columns with all zeros. Should be == to the number of columns
+    
+    label_col = which(names(training2)== "Species_no")
+
+    names <-  colnames(training2[,-c(label_col)])
+    y_col = label_col
+
+    model<-as.formula(paste(colnames(training2)[y_col], "~",
+                        paste(names,collapse = "+"),
+                        sep = ""))
+    gbm2<- gbm(model,
+               data=training2, 
+               distribution="bernoulli",
+               n.trees=15000,
+               shrinkage=0.01,
+               interaction.depth=3,
+               bag.fraction=0.50,
+               train.fraction=1,
+               n.minobsinnode=3,
+               cv.folds=10,
+               keep.data=TRUE)
+    
+    list_save <- c(list_save, list(gbm2))
+    
+    #get the relative influence info
+    x = summary(gbm2)
+    x.df= data.frame(variable = x$var,
+                     relative.influence = x$rel.inf)
+    x.df$variable = factor(x.df$variable, levels = x.df$variable[order(x.df$relative.influence)])
+    #save these results
+    x.df$i = i
+    out =  rbind(out, x.df)
+    
+    
+    #check performance using 5-fold cross-validation
+    best.iter2 <- gbm.perf(gbm2,method="cv",plot.it=FALSE) #OOB method under predicts
+    best.iter2.list = c(best.iter2.list, best.iter2)
+    
+    ## LABEL
+    ## predictions on the TRAINING SET
+    output2<-predict(gbm2, newdata=training2, n.trees=best.iter2, type="response") 
+    output2<-cbind(output2,as.numeric(training2$Species_no))
+    
+    # # training AUC for Bernoulli distributed responses
+    auc2=colAUC(output2[,1],output2[,2])
+    permutedAUC_train[i]<-auc2
+    
+    # Predictions on the TEST set
+    output.test2<-predict(gbm2, newdata=test2, n.trees=best.iter2, type="response") 
+    output.test2<-cbind(output.test2,as.numeric(test2$Species_no))
+    ## test AUC for Bernoulli distributed responses
+    auctest2=colAUC(output.test2[,1],output.test2[,2])
+    
+    permutedAUC[i]<-auctest2
+    print(auctest2)
+    i=i+1
+    print(i)#check where we are in bootstrap
+  } else i=i
+}
+
+save(intrain_list, file = "intrain_list_presence.Rdata")
+
+sum(is.na(permutedAUC)*1) #how many NAs
+permutedAUC2<-na.omit(permutedAUC)
+mean(permutedAUC2)
+sd(permutedAUC2)
+
+
+sum(is.na(permutedAUC_train)*1) #how many NAs
+permutedAUC2_train<-na.omit(permutedAUC_train)
+mean(permutedAUC2_train )
+sd(permutedAUC2_train)
+save(best.iter2.list, file = "best.iter2.list.binomial.rel.inf.Rdata")
+
+#Stop the clock
+(proc.time()-ptm)/60
+
+#summarize the relative influence data
+out_sum <- out %>% 
+  group_by(variable) %>%
+  summarize(mean_influence = mean(relative.influence)) %>%
+  filter(mean_influence>1)
+
+#get just the data for variables with mean influence greater than 1%
+out_high = subset(out, variable %in% out_sum$variable)
+
+save(out_high, file = "out_high.Rdata")
+load("out_high.Rdata")
+plot<- ggplot(data = out_high, aes(x = variable, y =relative.influence))+
+  ylab("relative influence (%)")+
+  xlab("variable")+
+  geom_boxplot()+
+  coord_flip()
+
+ggsave(plot = plot, filename = "Figure.relative.influence.boxplot.jpg")
+save(out, file = "rel.inf.presence.Rdata")
+#save list_save
+save(list_save, file = "list_save_presence.Rdata")
+
+load("list_save_presence.Rdata")
+
+```
+
+
