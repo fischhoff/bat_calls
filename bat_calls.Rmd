@@ -2,7 +2,7 @@
 title: "bat_calls"
 author: "Ilya"
 Ce: "11/12/2019"
-output: html_document
+output: github_document
 ---
 
 ```{r setup, include=FALSE}
@@ -21,7 +21,7 @@ pkgTest <- function(x)
 neededPackages <- c("caret", #for the confusionMatrix() function (also needs e1071 package)
                     "dplyr",# for some data preparation
         "gbm",#gbm
-                    "caTools", "ROCR")
+                    "caTools", "ROCR", "ggplot2")
 
 for (package in neededPackages){pkgTest(package)}
 
@@ -445,5 +445,21 @@ save(list_save, file = "list_save_presence.Rdata")
 load("list_save_presence.Rdata")
 
 ```
+##Max_entropy
+```{r}
+Cdf = read.csv("Calls.csv")
+plot <- ggplot(data = Cdf, aes(x = Species, y = Max_Entropy))+
+  geom_boxplot()
+plot
 
+```
+
+
+##Max_time
+```{r}
+Cdf = read.csv("Calls.csv")
+plot <- ggplot(data = Cdf, aes(x = Species, y = Max_Time))+
+  geom_boxplot()
+plot
+```
 
